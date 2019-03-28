@@ -1,0 +1,2082 @@
+<link rel="stylesheet" href="~/Content/ol465.min.css" />
+<link rel="stylesheet" href="~/Content/ol-ext.css" />
+    <script src="~/Scripts/ol.js"></script>
+    <script src="~/Scripts/ol-ext.js" type="text/javascript"></script>
+    <script type="text/javascript">
+        var R6Map = function (openlayer, settings) {
+            const SELECT_BOARD_URL = 'http://185.55.226.152/R6Api/api/R6OSM/GetOSMPois';
+            const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
+            //const OVERPASS_URL = 'https://overpass.kumi.systems/api/interpreter';
+            //https://overpass.kumi.systems/api/interpreter
+            //https://nominatim.openstreetmap.org/search?q=%D8%A7%D8%B3%D8%AF%D8%A2%D8%A8%D8%A7%D8%AF%DB%8C&format=jsonv2&polygon_geojson=1&addressdetails=1
+            const NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search?q=';
+            const NOMINATIM_OPTIONS = '&format=jsonv2&polygon_geojson=1&limit=50&addressdetails=1';
+            const PublicTransportQueryArray = [
+                '[out:json][timeout:55];',
+                '(area["name:en"="Tehran"][admin_level=8];)->.tehranArea;',
+                '(',
+                'node["public_transport"="stop_position"](area.tehranArea);',
+                'node["railway"="subway"](area.tehranArea);',
+                'way["railway"="subway"](area.tehranArea);',
+                'relation["railway"="subway"](area.tehranArea);',
+                'way["railway"="light_rail"](area.tehranArea);',
+                'way[electrified](area.tehranArea);',
+                'relation[type=route][route=bus](area.tehranArea);',
+                'node[highway=bus_stop](area.tehranArea);',
+                'way[highway=service][bus=yes](area.tehranArea);',
+                ');',
+                'out ids geom meta;',
+                '>;'];
+
+
+            let _ol = openlayer;
+            let _map = {};
+            var _baseLayerGroup = {};
+            var _poiLayerGroup = {};
+            var _searchLayerGroup = {};
+            var _publicTransportLayerGroup = {};
+            var _staticLayerGroup = {};
+            let _defaultSettings = {
+                domElement: 'map',
+                projection: 'EPSG:3857',
+                center: ol.proj.transform([51.4055, 35.7376], 'EPSG:4326', 'EPSG:3857'),
+                zoomLevel: 15,
+                scaleLineUnit: 'us'
+            };
+            let _options = Object.assign(_defaultSettings, settings);
+            let _extendedMapControl = {
+                ScaleLine: new _ol.control.ScaleLine({ units: _options.scaleLineUnit }),
+                ZoomSlider: new _ol.control.ZoomSlider(),
+                MousePosition: new _ol.control.MousePosition(),
+                FullScreen: new _ol.control.FullScreen()
+            };
+            let _utils = {
+                Constants: {
+                    R6_StaticBoundary_Query : '[out: json][timeout: 20]; (relation(id: 6729037);); out ids geom meta;',
+                    Tehran_TrafficBoundary_Query : '[out:json][timeout: 20];( way(id: 407209895);); out ids geom meta;',
+                    Tehran_EvenOdd_Traffic_Boudary_Query : '[out:json][timeout: 20];( way(id: 301709587);); out ids geom meta;'
+                },
+
+                Region6Extent: [51.375503540039055, 35.69996510861432, 51.43077850341797, 35.75682142111113],
+                TargetExtent: [51.375503540039055, 35.69996510861432, 51.43077850341797, 35.75682142111113],
+                TargetR6Area: '(area["name:en"="District 6"][admin_level=10];)->.searchArea;',
+                PublicTransportQuery: PublicTransportQueryArray.join(''),
+                ToastrError: function (title, content, delaySec) {
+                    toastr.error(content, title, { timeOut: (delaySec * 1000) });
+                },
+                ToastrInfo: function (title, content, delaySec) {
+                    toastr.info(content, title, { timeOut: (delaySec * 1000) });
+                },
+                ToastrWarning: function (title, content, delaySec) {
+                    toastr.warning(content, title, { timeOut: (delaySec * 1000) });
+                },
+                ToastrSuccess: function (title, content, delaySec) {
+                    toastr.success(content, title, { timeOut: (delaySec * 1000) });
+                },
+                ToastrMessage: function (title, msg, delaySec, msgType) {
+                    let htmlTitle = "<div style='font-family:irsans;font-weight:600;'>" + title + "</div>";
+                    let htmlMsg = "<div style='font-family:irsans'>" + msg + "</div>";
+                    switch (msgType) {
+                        case 1:
+                            _utils.ToastrError(title, htmlMsg, delaySec);
+                            break;
+                        case 2:
+                            _utils.ToastrInfo(title, htmlMsg, delaySec);
+                            break;
+                        case 3:
+                            _utils.ToastrSuccess(title, htmlMsg, delaySec);
+                            break;
+                        case 4:
+                            _utils.ToastrWarning(title, htmlMsg, delaySec);
+                            break;
+                    };
+                },
+                CreateFeature: function (coord, vSource) {
+                    var feature = new _ol.Feature({
+                        type: 'place',
+                        geometry: new _ol.geom.Point(_utils.To3857(coord))
+                    });
+                    feature.setStyle(_utils.Styles.RouteStyles.icon);
+                    vSource.addFeature(feature);
+                },
+                To4326: function (coord) {
+                    return _ol.proj.transform([parseFloat(coord[0]), parseFloat(coord[1])], 'EPSG:3857', 'EPSG:4326');
+                },
+                To3857: function (coord) {
+                    return _ol.proj.transform([parseFloat(coord[0]), parseFloat(coord[1])], 'EPSG:4326', 'EPSG:3857');
+                },
+                To4326Extent: function (extent, fromProj) {
+                    return _ol.proj.transformExtent(extent, fromProj, 'EPSG:4326');
+                },
+                Styles: {
+                    StaticStyle: 
+                        new _ol.style.Style({
+                            image: new _ol.style.Circle({
+                                radius: 8,
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(255, 235, 59, 0.2)'
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgb(233, 30, 99)',
+                                    width: 3,
+                                }),
+                            }),
+                            stroke: new _ol.style.Stroke({
+                                color: 'rgb(233, 30, 99)',
+                                width: 3,
+                                lineDash: [10, 10],
+                            }),
+                            fill: new _ol.style.Fill({
+                                color: 'rgba(255, 235, 59, 0.2)',
+                            })
+                        }),                    
+                    NominatimStyle: {
+                        'Point': new _ol.style.Style({
+                            image: new _ol.style.Circle({
+                                radius: 5,
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(255,0,0,0.3)'
+                                }),
+                                stroke: new _ol.style.Stroke({ color: 'red', width: 3 })
+                            })
+                        }),
+                        'LineString': new _ol.style.Style({
+                            stroke: new _ol.style.Stroke({
+                                color: 'rgba(255, 0, 0, 0.8)',
+                                width: 8
+                            })
+                        }),
+                        'MultiLineString': new _ol.style.Style({
+                            stroke: new _ol.style.Stroke({
+                                color: 'green',
+                                width: 5
+                            })
+                        }),
+                        'MultiPoint': new _ol.style.Style({
+                            image: new _ol.style.Circle({
+                                radius: 5,
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(255,0,0,0.3)'
+                                }),
+                                stroke: new _ol.style.Stroke({ color: 'red', width: 1 })
+                            })
+                        }),
+                        'MultiPolygon': new _ol.style.Style({
+                            stroke: new _ol.style.Stroke({
+                                color: 'yellow',
+                                width: 1
+                            }),
+                            fill: new _ol.style.Fill({
+                                color: 'rgba(255, 255, 0, 0.1)'
+                            })
+                        }),
+                        'Polygon': new _ol.style.Style({
+                            stroke: new _ol.style.Stroke({
+                                color: 'rgba(90, 90, 90, 0.9)',
+                                lineDash: [4],
+                                width: 3
+                            }),
+                            fill: new _ol.style.Fill({
+                                color: 'rgba(250, 0, 0, 0.1)'
+                            })
+                        }),
+                        'GeometryCollection': new _ol.style.Style({
+                            stroke: new _ol.style.Stroke({
+                                color: 'magenta',
+                                width: 5
+                            }),
+                            fill: new _ol.style.Fill({
+                                color: 'magenta'
+                            }),
+                            image: new _ol.style.Circle({
+                                radius: 10,
+                                fill: null,
+                                stroke: new _ol.style.Stroke({
+                                    color: 'magenta'
+                                })
+                            })
+                        }),
+                        'Circle': new _ol.style.Style({
+                            stroke: new _ol.style.Stroke({
+                                color: 'red',
+                                width: 5
+                            }),
+                            fill: new _ol.style.Fill({
+                                color: 'rgba(255,0,0,0.6)'
+                            })
+                        })
+                    },
+                    ControlStyles: {
+                        DrawingStyle : new _ol.style.Style({
+                            fill: new ol.style.Fill({
+                                color: "rgba(255, 255, 255, 0.2)"
+                            }),
+                            stroke: new _ol.style.Stroke({
+                                color: "#f44336",
+                                width: 3
+                            }),
+                            image: new _ol.style.Circle({
+                                radius: 6,
+                                fill: new ol.style.Fill({
+                                    color: "#f44336"
+                                })
+                            })
+                        }),
+                        MeasuringStyle : new _ol.style.Style({
+                            fill: new ol.style.Fill({
+                                color: "rgba(255, 255, 255, 0.2)"
+                            }),
+                            stroke: new ol.style.Stroke({
+                                color: "#f44336",
+                                width: 3
+                            }),
+                            image: new ol.style.Circle({
+                                radius: 6,
+                                fill: new ol.style.Fill({
+                                    color: "#f44336"
+                                })
+                            })
+                        })
+                    },
+                    PublicTransportStaticStyle: {
+                        'highway': {
+                            'service': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 10,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(255, 0, 255, 0.3)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(255, 0, 255, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(255, 0, 0, 1.0)',
+                                    width: 4
+                                })
+                            }),
+                            'bus_stop': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.RegularShape({
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(200, 0, 0, 0.6)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(200, 0, 0, 0.9)',
+                                        width: 2
+                                    }),
+                                    points: 4,
+                                    radius: 6,
+                                    angle: Math.PI / 4
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(255, 255, 0, 1.0)',
+                                    width: 3
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(255, 255, 0, 0.3)'
+                                })
+                            }),
+                            '.*': new _ol.style.Style({
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(255, 0, 255, 1.0)',
+                                    width: 2
+                                })
+                            }),
+                        },
+                        'bus': {
+                            'yes': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 4,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(255, 0, 255, 0.3)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(255, 0, 255, 1.0)',
+                                        width: 4
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(255, 0, 255, 1.0)',
+                                    width: 6
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(255, 0, 255, 0.3)'
+                                })
+                            }),
+                        },
+                        'railway': {
+                            'subway': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 14,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(240, 0, 0, 1.0)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(246, 0, 0, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(246, 0, 0, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(246, 0, 0, 0.3)'
+                                })
+                            }),
+                            'station': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 12,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(240, 0, 0, 0.4)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(246, 0, 0, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(246, 0, 0, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(246, 0, 0, 0.3)'
+                                })
+                            }),
+                            'light_rail': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 5,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(0, 240, 0, 1.0)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(0, 240, 0, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(0, 240, 0, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(0, 240, 0, 0.3)'
+                                })
+                            })
+                        },
+                        'railway': {
+                            'subway': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.RegularShape({
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(250, 250, 250, 0.3)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(250, 250, 250, 1.0)',
+                                        width: 2
+                                    }),
+                                    points: 4,
+                                    radius: 10,
+                                    angle: Math.PI / 4
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(0, 0, 200, 0.8)',
+                                    width: 4
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(0, 0, 200, 0.3)'
+                                })
+                            }),
+                            'station': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.RegularShape({
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(250, 250, 250, 0.8)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(250, 250, 250, 0.9)',
+                                        width: 2
+                                    }),
+                                    points: 4,
+                                    radius: 4,
+                                    angle: Math.PI / 4
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(246, 0, 0, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(246, 0, 0, 0.3)'
+                                })
+                            }),
+                            'service': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 8,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(0, 240, 0, 0.3)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(0, 240, 0, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(0, 240, 0, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(0, 240, 0, 0.3)'
+                                })
+                            })
+                        },
+                        'subway': {
+                            '.*': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.RegularShape({
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(0, 250, 250, 0.8)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(0, 250, 250, 0.9)',
+                                        width: 2
+                                    }),
+                                    points: 4,
+                                    radius: 4,
+                                    angle: Math.PI / 4
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(0, 240, 240, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(0, 240, 240, 0.3)'
+                                })
+                            })
+                        },
+                        'light_rail': {
+                            '.*': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 5,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(0, 240, 240, 1.0)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(0, 240, 240, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(0, 240, 240, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(0, 240, 240, 0.3)'
+                                })
+                            })
+                        },
+                        'route': {
+                            'bus': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 5,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(0, 0, 240, 0.3)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(0, 0, 240, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(0, 0, 240, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(0, 0, 240, 0.3)'
+                                })
+                            })
+                        },
+                        'public_transport': {
+                            'stop_position': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.RegularShape({
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(250, 250, 250, 0.8)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(250, 0, 0, 0.9)',
+                                        width: 2
+                                    }),
+                                    points: 3,
+                                    radius: 8,
+                                    rotation: Math.PI / 2,
+                                    angle: 0
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(0, 0, 240, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(0, 0, 240, 0.3)'
+                                })
+                            })
+                        },
+                        'electrified': {
+                            '.*': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 5,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(0, 240, 240, 1.0)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(0, 240, 240, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(0, 220, 0, 1.0)',
+                                    width: 4
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(0, 220, 0, 0.3)'
+                                })
+                            })
+                        }
+                    },
+                    POIStaticStyle: {
+                        'amenity': {
+                            'parking': new _ol.style.Style({
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(170, 170, 170, 1.0)',
+                                    width: 1
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(170, 170, 170, 0.3)'
+                                })
+                            }),
+                            'atm': new _ol.style.Style({
+                                image: new _ol.style.Circle({
+                                    radius: 5,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(140, 208, 95, 1.0)'
+                                    }),
+                                    stroke: null
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(170, 170, 170, 1.0)',
+                                    width: 1
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(170, 170, 170, 0.3)'
+                                })
+                            }),
+                            'bank': new ol.style.Style({
+                                image: new ol.style.FontSymbol({
+                                    form: 'bubble',
+                                    fontSize: 0.7,
+                                    radius: 16,
+                                    color: 'white',
+                                    fill: new ol.style.Fill({
+                                        color: 'rgb(63, 81, 181)'
+                                    }),
+                                    stroke: new ol.style.Stroke({
+                                        width: 2,
+                                        color: 'white'
+                                    })
+                                }),
+                                stroke: new ol.style.Stroke({
+                                    color: 'rgb(63, 81, 181)',
+                                    width: 1
+                                }),
+                                fill: new ol.style.Fill({
+                                    color: 'rgba(63, 81, 181, 0.5)',
+                                })
+                            }),
+                            'cafe': new ol.style.Style({
+                                image: new ol.style.FontSymbol({
+                                    form: 'bubble',
+                                    fontSize: 0.7,
+                                    radius: 16,
+                                    color: 'white',
+                                    fill: new ol.style.Fill({
+                                        color: 'rgb(210, 12, 12)'
+                                    }),
+                                    stroke: new ol.style.Stroke({
+                                        width: 2,
+                                        color: 'white'
+                                    })
+                                }),
+                                stroke: new ol.style.Stroke({
+                                    color: 'rgb(210, 12, 12)',
+                                    width: 1
+                                }),
+                                fill: new ol.style.Fill({
+                                    color: 'rgba(210, 12, 12, 0.5)',
+                                })
+                            })
+                        },
+                        'building': {
+                            '.*': new _ol.style.Style({
+                                zIndex: 100,
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(246, 99, 79, 1.0)',
+                                    width: 1
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(246, 99, 79, 0.3)'
+                                })
+                            })
+                        },
+                        'highway': {
+                            'service': new _ol.style.Style({
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(255, 0, 255, 1.0)',
+                                    width: 2
+                                })
+                            }),
+                            'bus_stop': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 10,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(255, 255, 0, 0.3)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(255, 255, 0, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(255, 255, 0, 1.0)',
+                                    width: 3
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(255, 255, 0, 0.3)'
+                                })
+                            }),
+                            '.*': new _ol.style.Style({
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(255, 0, 255, 1.0)',
+                                    width: 2
+                                })
+                            }),
+
+                        },
+                        'landuse': {
+                            'forest|grass|allotments': new ol.style.Style({
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(140, 208, 95, 1.0)',
+                                    width: 1
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(140, 208, 95, 0.3)'
+                                })
+                            })
+                        },
+                        'natural': {
+                            'tree': new _ol.style.Style({
+                                image: new _ol.style.Circle({
+                                    radius: 2,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(140, 208, 95, 1.0)'
+                                    }),
+                                    stroke: null
+                                })
+                            })
+                        },
+                        'railway': {
+                            'subway': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 5,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(240, 0, 0, 1.0)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(246, 0, 0, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(246, 0, 0, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(246, 0, 0, 0.3)'
+                                })
+                            }),
+                            'station': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 5,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(240, 0, 0, 1.0)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(246, 0, 0, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(246, 0, 0, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(246, 0, 0, 0.3)'
+                                })
+                            }),
+                            'light_rail': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 5,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(0, 240, 0, 1.0)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(0, 240, 0, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(0, 240, 0, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(0, 240, 0, 0.3)'
+                                })
+                            })
+                        },
+                        'railway': {
+                            'subway': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 5,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(240, 0, 0, 1.0)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(246, 0, 0, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(246, 0, 0, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(246, 0, 0, 0.3)'
+                                })
+                            }),
+                            'station': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 5,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(240, 0, 0, 0.3)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(246, 0, 0, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(246, 0, 0, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(246, 0, 0, 0.3)'
+                                })
+                            }),
+                            'service': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 8,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(0, 240, 0, 0.3)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(0, 240, 0, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(0, 240, 0, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(0, 240, 0, 0.3)'
+                                })
+                            })
+                        },
+                        'subway': {
+                            '.*': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 5,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(0, 240, 240, 1.0)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(0, 240, 240, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(0, 240, 240, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(0, 240, 240, 0.3)'
+                                })
+                            })
+                        },
+                        'light_rail': {
+                            '.*': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 5,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(0, 240, 240, 1.0)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(0, 240, 240, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(0, 240, 240, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(0, 240, 240, 0.3)'
+                                })
+                            })
+                        },
+                        'route': {
+                            'bus': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 5,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(0, 0, 240, 0.3)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(0, 0, 240, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(0, 0, 240, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(0, 0, 240, 0.3)'
+                                })
+                            })
+                        },
+                        'public_transport': {
+                            'stop_position': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 12,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(0, 0, 240, 0.3)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(0, 0, 240, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(0, 0, 240, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(0, 0, 240, 0.3)'
+                                })
+                            })
+                        },
+                        'electrified': {
+                            '.*': new _ol.style.Style({
+                                zIndex: 100,
+                                image: new _ol.style.Circle({
+                                    radius: 5,
+                                    fill: new _ol.style.Fill({
+                                        color: 'rgba(0, 240, 240, 1.0)'
+                                    }),
+                                    stroke: new _ol.style.Stroke({
+                                        color: 'rgba(0, 240, 240, 1.0)',
+                                        width: 2
+                                    })
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: 'rgba(0, 240, 240, 1.0)',
+                                    width: 8
+                                }),
+                                fill: new _ol.style.Fill({
+                                    color: 'rgba(0, 240, 240, 0.3)'
+                                })
+                            })
+                        }
+                    },
+                    RouteStyles: {
+                        route: new _ol.style.Style({
+                            stroke: new _ol.style.Stroke({
+                                width: 8, color: [160, 12, 0, 0.8]
+                            })
+                        }),
+                        icon: new _ol.style.Style({
+                            image: new _ol.style.Icon({
+                                anchor: [0.5, 1],
+                                src: 'http://cdn.rawgit.com/openlayers/ol3/master/examples/data/icon.png'
+                            }),
+                            zIndex: 100
+                        })
+                    },
+                    CreateRandomPOIStyle: () => {
+                        let rndColor = _utils.GetRGBRandomColor();
+                        let rgb = rndColor + ", 1.0)";
+                        let rgba = rndColor + ", 0.3)";
+                        console.log(rgb);
+                        return new _ol.style.Style({
+                            image: new _ol.style.FontSymbol({
+                                form: 'bubble',
+                                fontSize: 0.7,
+                                radius: 16,
+                                color: 'white',
+                                fill: new _ol.style.Fill({
+                                    color: rgb
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    width: 2,
+                                    color: 'white'
+                                })
+                            }),
+                            stroke: new _ol.style.Stroke({
+                                color: rgb,
+                                width: 1
+                            }),
+                            fill: new _ol.style.Fill({
+                                color: rgba,
+                            })
+                        });
+                    },
+                    CreateRandomPOIStyle2: () => {
+                        let rndColor = _utils.GetRGBRandomColor();
+                        let rgb = rndColor + ", 1.0)";
+                        let rgba = rndColor + ", 0.3)";
+                        console.log(rgb);
+                        return new _ol.style.Style({
+                            image: new _ol.style.Circle({
+                                radius: 9,
+                                fill: new _ol.style.Fill({
+                                    color: rgb
+                                }),
+                                stroke: new _ol.style.Stroke({
+                                    color: rgba,
+                                    width: 3
+                                }),
+                            }),
+                            stroke: new _ol.style.Stroke({
+                                color: rgb,
+                                width: 1
+                            }),
+                            fill: new _ol.style.Fill({
+                                color: rgba
+                            })
+                        });
+                    },
+                    CreateKeyValueStyle: (k, v) => {
+                        let found = false;
+                        for (var key in _utils.Styles.POIStaticStyle) {
+                            console.log(key);
+                            if (key.toLowerCase() === k.toLowerCase()) {
+                                for (var regexp in _utils.Styles.POIStaticStyle[key]) {
+                                    console.log(regexp);
+                                    if (new RegExp(regexp).test(v)) {
+                                        //return _utils.Styles.POIStaticStyle[key][regexp];
+                                        found = true;
+                                        return _utils.Styles.POIStaticStyle[key][regexp];
+                                    }
+                                }
+                            }
+                        }
+                        if (!found) {
+                            let randomStyle = _utils.Styles.CreateRandomPOIStyle();
+                            return randomStyle;
+                        }
+                    },
+                    NominatimStyleFunction: function (feature) {
+                        return _utils.Styles.NominatimStyle[feature.getGeometry().getType()];
+                    }
+                },
+                GetRandomColor: () => {
+                    var letters = '0123456789ABCDEF';
+                    var color = '#';
+                    for (var i = 0; i < 6; i++) {
+                        color += letters[Math.floor(Math.random() * 16)];
+                    }
+                    return color;
+                },
+                GetRGBRandomColor: () => {
+                    var hexStr = _utils.GetRandomColor();
+                    var hex = parseInt(hexStr.substring(1), 16);
+                    var rcolor = (hex & 0xff0000) >> 16;
+                    var gcolor = (hex & 0x00ff00) >> 8;
+                    var bcolor = hex & 0x0000ff;
+                    var color = "rgba(" + rcolor + "," + gcolor + "," + bcolor;
+                    return color;
+                },
+                CoordinateToBBoxString: (l, b, r, t) => {
+                    let bbox = [];
+                    bbox.push(l);
+                    bbox.push(b);
+                    bbox.push(r);
+                    bbox.push(t);
+                    let _j = bbox.join(",");
+                    let joined = `(${_j});`;
+                    return joined;
+                },
+                ExtentToBBoxString: (extent) => {
+                    if (extent.length != 4) {
+                        return '';
+                    }
+                    let bboxString = '(' +
+                        extent[1] + ',' + extent[0] + ',' +
+                        extent[3] + ',' + extent[2] +
+                        ');';
+                    return bboxString;
+                },
+                OverpassBBoxQuery: (extent, q) => {
+                    if (q.indexOf('({{bbox}})') < 0) {
+                        return q;
+                    }
+                    if (extent.length != 4) {
+                        return q;
+                    }
+                    let bboxString = _utils.ExtentToBBoxString(extent);
+                    let innerQuerySegment = q;
+
+                    while (true) {
+                        innerQuerySegment = innerQuerySegment.replace('({{bbox}})', bboxString);
+                        if (innerQuerySegment.indexOf('({{bbox}})') < 0) {
+                            break;
+                        }
+                    }
+                    // [timeout:35];(node[amenity=cafe]({{bbox}}));out meta;
+                    let finalQuery = `[out:json][timeout:35];(${innerQuerySegment});out ids geom meta;`;
+                    return finalQuery;
+                },
+                OverpassAreaQuery: (q) => {
+                    if (q.indexOf('({{bbox}})') < 0) {
+                        return q;
+                    }
+                    let areaString = '(area.searchArea);';
+                    let innerQuerySegment = q;
+
+                    while (true) {
+                        innerQuerySegment = innerQuerySegment.replace('({{bbox}})', areaString);
+                        if (innerQuerySegment.indexOf('({{bbox}})') < 0) {
+                            break;
+                        }
+                    }
+                    let finalQuery = `[out:json][timeout:35];${_utils.TargetR6Area}(${innerQuerySegment});out ids geom meta;`;
+                    return finalQuery;
+                },
+                Formatter: {
+                    JSONFormatter: (res, cb) => {
+                        console.log('Begin Formatter');
+                        //console.log(res);
+                        let featureArray = [];
+                        $.each(res.elements, (i, v) => {
+                            console.log(v);
+                            var metaInfo = { changeset: v.changeset, osmid: v.id, osmtype: v.type, osmuid: v.uid, user: v.user, timestamp:v.timestamp };
+                            let _props = Object.assign(v.tags, metaInfo);
+                            if (v.type === 'node') {
+                                var point = turf.point([v.lon, v.lat], _props);
+                                featureArray.push(point);
+                            }
+                            else if (v.type === 'relation') {
+                                $.each(v.members, (j, member) => {
+                                    if (member.type === 'node') {
+                                        var innerPoint = turf.point([member.lon, member.lat], _props);
+                                        featureArray.push(innerPoint);
+                                    }
+                                    else if (member.type === 'way') {
+                                        var genericInnerGeom = member.geometry;
+                                        var isInnerPolygon = ((genericInnerGeom[0].lat === genericInnerGeom[genericInnerGeom.length - 1].lat) &&
+                                            (genericInnerGeom[0].lon === genericInnerGeom[genericInnerGeom.length - 1].lon));
+                                        if (isInnerPolygon) {
+                                            let lsArray = [];
+                                            $.each(genericInnerGeom, (j, a) => {
+                                                lsArray.push([a.lon, a.lat]);
+                                            });
+                                            var innerPolygon = turf.polygon([lsArray], _props);
+                                            featureArray.push(innerPolygon);
+                                        }
+                                        else {
+                                            let lsArray = [];
+                                            $.each(genericInnerGeom, (j, a) => {
+                                                lsArray.push([a.lon, a.lat]);
+                                            });
+                                            innerLinestring = turf.lineString(lsArray, _props);
+                                            featureArray.push(innerLinestring);
+                                        }
+                                    }
+                                });
+                            }
+                            else if (v.type === 'way') {
+                                var genericGeom = v.geometry;
+                                var isPolygon = ((genericGeom[0].lat === genericGeom[genericGeom.length - 1].lat) &&
+                                    (genericGeom[0].lon === genericGeom[genericGeom.length - 1].lon));
+                                console.log(genericGeom);
+                                console.log('Is Poly ' + isPolygon);
+                                if (isPolygon) {
+                                    let lsArray = [];
+                                    $.each(genericGeom, (j, a) => {
+                                        lsArray.push([a.lon, a.lat]);
+                                    });
+                                    var polygon = turf.polygon([lsArray], _props);
+                                    console.log(polygon);
+                                    featureArray.push(polygon);
+                                }
+                                else {
+                                    let lsArray = [];
+                                    $.each(genericGeom, (j, a) => {
+                                        lsArray.push([a.lon, a.lat]);
+                                    });
+                                    linestring = turf.lineString(lsArray, _props);
+                                    console.log(linestring);
+                                    featureArray.push(linestring);
+                                }
+                                // v.tags
+                                //var linestring1 = turf.lineString([[-24, 63], [-23, 60], [-25, 65], [-20, 69]], {name: 'line 1'});
+                                //var polygon = turf.polygon([[[-5, 52], [-4, 56], [-2, 51], [-7, 54], [-5, 52]]], { name: 'poly1' });
+                            }
+                        });
+                        var collection = turf.featureCollection(featureArray);
+                        console.log('End Formatter');
+                        cb(collection);
+                    }
+                },
+                OverpassLoader: (query) => {
+                    return new Promise((resolve, reject) => {
+                        _utils.Ajax.PostJSONAsync(OVERPASS_URL, query).done((response) => {
+                            console.log(response);
+                            _utils.Formatter.JSONFormatter(response, (fc) => {
+                                console.log("In Loader");
+                                console.log(fc);
+                                var features = new _ol.format.GeoJSON().readFeatures(fc, {
+                                    dataProjection: 'EPSG:4326',
+                                    featureProjection: 'EPSG:3857'
+                                });
+                                resolve(features);
+                            });
+                            //var features = new _ol.format.OSMXML().readFeatures(response, {
+                            //    featureProjection: _map.getView().getProjection()
+                            //});
+                            //resolve(features);
+                        }).fail((jqXHR, exception) => {
+                            console.log("Loader Error");
+                            console.log(jqXHR);
+                            console.log(exception);
+                            reject("ERRROOOORRR 1");
+                        });
+                    });
+                },
+                NominatimLoader: (query, options) => {
+                    return new Promise((resolve, reject) => {
+                        //https://nominatim.openstreetmap.org/search?q=%D8%A7%D8%B3%D8%AF%D8%A2%D8%A8%D8%A7%D8%AF%DB%8C
+                        let finalUrl = `${NOMINATIM_URL}${query}${NOMINATIM_OPTIONS}`;
+                        console.log(finalUrl);
+                        _utils.Ajax.GetJSONAsync(finalUrl, query).done((response) => {
+                            if (response.length > 0) {
+                                let featureArray = [];
+                                _nominatimResultDic.RemoveAll();
+                                $.each(response, (i, v) => {
+                                    let _options = Object.assign({}, v.address);
+                                    for (var k in v) {
+                                        if (k === 'boundingbox') {
+                                            _options[k] = v[k];
+                                        }
+                                        if (k === 'lat') {
+                                            _options[k] = v[k];
+                                        }
+                                        if (k === 'lon') {
+                                            _options[k] = v[k];
+                                        }
+                                        if (k === 'osm_id') {
+                                            _options[k] = v[k];
+                                        }
+                                        if (k === 'osm_type') {
+                                            _options[k] = v[k];
+                                        }
+                                        if (k === 'display_name') {
+                                            _options[k] = v[k];
+                                        }
+                                        if (k === 'category') {
+                                            _options[k] = v[k];
+                                        }
+                                        if (k === 'type') {
+                                            _options[k] = v[k];
+                                        }
+                                    }
+                                    _nominatimResultDic.Add(v.osm_id, _options);
+                                    //console.log(_options);
+                                    featureArray.push(turf.feature(v.geojson, _options));
+                                });
+                                var collection = turf.featureCollection(featureArray);
+                                resolve(collection);
+                            } else {
+                                reject("ERRROOOORRR 6");
+                            }
+
+                        }).fail((jqXHR, exception) => {
+                            console.log("Loader Error");
+                            reject("ERRROOOORRR 5");
+                        });
+                    });
+                },
+                GetPOIDetails: () => {
+                    return new Promise((resolve, reject) => {
+                        _utils.Ajax.GetJSONAsync(SELECT_BOARD_URL).done((response) => {
+                            resolve(response);
+                        }).fail((jqXHR, exception) => {
+                            console.log("GetPOIDetails Error");
+                            reject(jqXHR, exception);
+                        });
+                        // Using fetch
+                        //fetch(SELECT_BOARD_URL).then(function (response) {
+                        //    console.log("----------------");
+                        //    console.log(response);
+                        //    if (response.status >= 200 && response.status < 300) {
+                        //        return response.json();
+                        //    }
+                        //    else {
+                        //        reject("error");
+                        //    }
+
+                        //}).then(function (json) {  
+                        //    console.log("----------------");
+                        //    console.log(json);
+                        //    resolve(json);
+                        //});
+                    });
+                },
+                Ajax: {
+                    PostJSONAsync: function (url, data) {
+                        return $.ajax({
+                            method: "POST",
+                            url: url,
+                            headers: { 'Access-Control-Allow-Origin': ' anonymous' },
+                            contentType: "application/json",
+                            data: data
+                        });
+                    },
+                    GetJSONAsync: function (url) {
+                        return $.ajax({
+                            method: "GET",
+                            url: url,
+                            contentType: "application/json"
+                        });
+                    },
+                    GetJSONPAsync: function (url) {
+                        return $.ajax({
+                            method: "GET",
+                            url: url,
+                            headers: { 'Access-Control-Allow-Origin': '*' },
+                            crossDomain: true,
+                            dataType: 'jsonp'
+                        });
+                    }
+                },
+                ChangeTargetExtent: (newExtent) => {
+                    _utils.ToastrMessage("Event", "Resolution/Extent Changed. Calculating Target Extent...", 6, 2);
+                    if (_ol.extent.containsExtent(_utils.Region6Extent, newExtent)) {
+                        _utils.ToastrMessage("Info", "New Extent is smaller than default extent so we can use it", 3, 3);
+                        _utils.TargetExtent = newExtent;
+                    }
+                    else {
+                        _utils.ToastrMessage("Info", "New Extent is bigger than default extent so we ignore it.", 3, 4);
+                        _utils.TargetExtent = _utils.Region6Extent;
+                    }
+                },
+                Dictionary: function () {
+                    let datastore = new _ol.Object({});
+                    let registerEvent = (cb) => {
+                        datastore.on('propertychange', function (evt) {
+                            if (cb) {
+                                cb(evt);
+                            }
+                        });
+                    }
+                    let add = (key, value) => {
+                        if (!hasKey(key))
+                            datastore.set(key, value);
+                    };
+                    let reval = (key, value) => {
+                        if (hasKey(key))
+                            datastore.set(key, value);
+                    };
+                    let find = (key) => {
+                        return datastore.get(key);
+                    };
+                    let remove = (key) => {
+                        datastore.unset(key);
+                    };
+                    let removeAll = (key) => {
+                        for (var key in datastore.getProperties()) {
+                            datastore.unset(key);
+                        }
+                    };
+                    let hasKey = (key) => {
+                        return (find(key) ? true : false);
+                    };
+                    let showAll = () => {
+                        for (var key in datastore.getProperties()) {
+                            console.log(key + " -> " + datastore.get(key));
+                        }
+                    };
+                    let count = () => {
+                        let counter = 0;
+                        for (var key in datastore.getProperties()) {
+                            counter++;
+                        }
+                        return counter;
+                    };
+                    return {
+                        DataSource: datastore,
+                        Count: count,
+                        Add: add,
+                        Reval: reval,
+                        Find: find,
+                        Remove: remove,
+                        RemoveAll: removeAll,
+                        ShowAll: showAll,
+                        HasKey: hasKey,
+                        RegisterEvent: registerEvent
+                    }
+
+                },
+                OnResoluionChange: (evt) => {
+                    //console.log(evt);
+                    var ex = _map.getView().calculateExtent(_map.getSize())
+                    var epsg4326Extent = _utils.To4326Extent(ex, _map.getView().getProjection());
+                    _utils.ChangeTargetExtent(epsg4326Extent);
+                }
+            };
+            let _featureDic = new _utils.Dictionary();
+            let _nominatimResultDic = new _utils.Dictionary();
+            let _vectorMapSources = {
+                ControlSource: {
+                    DrawingSource: new _ol.source.Vector(),
+                    MeasuringSource: new _ol.source.Vector(),
+                },
+                OverpassPOISource: (_q, _title) => {
+                    return new _ol.source.Vector({
+                        format: new _ol.format.OSMXML(),
+                        loader: function (extent, resolution, projection) {
+                            var epsg4326Extent = _utils.To4326Extent(extent, projection);
+                            _utils.ChangeTargetExtent(epsg4326Extent);
+                            console.log(_q);
+                            console.log(extent);
+                            console.log(resolution);
+                            let _query = _q;
+                            _utils.ToastrMessage("Info", "OverpassPOISource Getting Data", 3, 2);
+                            _utils.OverpassLoader(_query).then((fs) => {
+                                var cnt = "Features=" + fs.length;
+                                _utils.ToastrMessage("OverpassPOISource Success", cnt, 3, 3);
+                                // Here we know what the fuck we have now.
+                                // We should also decide to when is the appropriate moement to send thses features
+                                // to our view model. but we should know that here right before addFeature nothing has rendered yet.
+                                _featureDic.Add(_title, fs);
+                                this.addFeatures(fs);
+                            }).catch((err) => {
+                                console.log("OverpassPOISource Rejected in loader " + err);
+                            });
+
+                        },
+                        // _ol.loadingstrategy.bbox should be used with carefully . 
+                        strategy: _ol.loadingstrategy.all
+                    });
+                },
+                OverpassSearchSource: (_q, _title) => {
+                    return new _ol.source.Vector({
+                        format: new _ol.format.OSMXML(),
+                        loader: function (extent, resolution, projection) {
+                            var epsg4326Extent = _utils.To4326Extent(extent, projection);
+                            _utils.ChangeTargetExtent(epsg4326Extent);
+                            console.log(_q);
+                            console.log(extent);
+                            console.log(resolution);
+                            let _query = _q;
+                            _utils.ToastrMessage("Info", "OverpassSearchSource Getting Data", 3, 2);
+                            _utils.OverpassLoader(_query).then((fs) => {
+                                var cnt = "Features=" + fs.length;
+                                _utils.ToastrMessage("OverpassSearchSource Success", cnt, 3, 3);
+                                // Here we know what the fuck we have now.
+                                // We should also decide to when is the appropriate moement to send thses features
+                                // to our view model. but we should know that here right before addFeature nothing has rendered yet.
+                                _featureDic.Add(_title, fs);
+                                this.addFeatures(fs);
+                            }).catch((err) => {
+                                console.log("OverpassSearchSource Rejected in loader " + err);
+                            });
+
+                        },
+                        strategy: _ol.loadingstrategy.bbox
+                    });
+                },
+                OverpassStaticSource: (_q, _title) => {
+                    return new _ol.source.Vector({
+                        format: new _ol.format.OSMXML(),
+                        loader: function (extent, resolution, projection) {
+                            console.log(_q);
+                            _utils.ToastrMessage("Info", "OverpassStaticSource Getting Data", 3, 2);
+                            _utils.OverpassLoader(_q).then((fs) => {
+                                var cnt = "Features=" + fs.length;
+                                _utils.ToastrMessage("OverpassStaticSource Success", cnt, 3, 3);
+                                this.addFeatures(fs);
+                            }).catch((err) => {
+                                console.log("OverpassStaticSource Rejected in loader " + err);
+                            });
+                        },
+                        strategy: _ol.loadingstrategy.all
+                    });
+                }
+            };
+            let _vectorMapLayers = {
+                CreateOverpassPOILayer: (_q, _title, cb) => {
+                    let newLayer = new _ol.layer.Vector({
+                        source: _vectorMapSources.OverpassPOISource(_q, _title),
+                        title: _title,
+                        name: _title,
+                        style: _utils.Styles.CreateRandomPOIStyle()
+                    });
+                    cb(newLayer, _poiLayerGroup);
+                },
+                CreateOverpassSearchLayer: (_q, _title, cb) => {
+                    let newLayer = new _ol.layer.Vector({
+                        source: _vectorMapSources.OverpassSearchSource(_q, _title),
+                        title: _title,
+                        name: _title,
+                        style: _utils.Styles.CreateRandomPOIStyle()
+                    });
+                    cb(newLayer, _poiLayerGroup);
+                },
+                CreateNominatimLayer: (_q, _title, _options, cb) => {
+                    _utils.NominatimLoader(_q, _options).then((fc) => {
+                        var src = new _ol.source.Vector({
+                            features: (new _ol.format.GeoJSON()).readFeatures(fc, {
+                                dataProjection: 'EPSG:4326',
+                                featureProjection: 'EPSG:3857'
+                            })
+                        });
+                        let newLayer = new _ol.layer.Vector({
+                            source: src,
+                            title: _title,
+                            name: _title,
+                            style: _utils.Styles.NominatimStyleFunction
+                        });
+                        // We dont add layer here.
+                        //_searchLayerGroup.getLayers().push(newLayer);
+                        cb(newLayer, _searchLayerGroup);
+                    }, (rj) => {
+                        console.log('Nominatim Rejected');
+                        console.log(rj);
+                        return null;
+                    }).catch((err) => {
+                        console.log("NominatimLoader Rejected in loader " + err);
+                    });
+
+                },
+                CreateStaticLayer: (_q, _title, cb) => {
+                    let newLayer = new _ol.layer.Vector({
+                        source: _vectorMapSources.OverpassStaticSource(_q, _title),
+                        projection: "ESPG: 4326",
+                        visible: true,
+                        title: _title,
+                        name: _title,
+                        style: _utils.Styles.StaticStyle
+                    });
+                    cb(newLayer, _staticLayerGroup);
+
+                },
+                CreateOverPassTransportLayer: (_title, cb) => {
+                    let newLayer = new _ol.layer.Vector({
+                        source: _vectorMapSources.OverpassPOISource(_utils.PublicTransportQuery, _title),
+                        title: _title,
+                        name: "Overpass Public Transport",
+                        style: function (feature) {
+                            //console.log("Style Function");
+                            for (var key in _utils.Styles.PublicTransportStaticStyle) {
+                                //console.log('searching feature for key = ' + key);
+                                //console.log(feature);
+                                var value = feature.get(key);
+                                if (value !== undefined) {
+                                    //console.log('found key =' + key + ' Value=' + value);
+                                    for (var regexp in _utils.Styles.PublicTransportStaticStyle[key]) {
+                                        //console.log('Searching match style in second level for  ' + regexp);
+                                        if (new RegExp(regexp).test(value)) {
+                                            let targetStyle = _utils.Styles.PublicTransportStaticStyle[key][regexp];
+                                            //console.log(key + ':' + regexp);
+                                            //console.log(targetStyle);
+                                            return targetStyle;
+                                        }
+                                    }
+                                }
+                                else {
+                                    //console.log('value not fonund for = ' + key );
+                                }
+                            }
+                            return null;
+                        }
+                    });
+                    cb(newLayer, _publicTransportLayerGroup);
+                },
+                CreateControlLayer: (_name, _title,_source, _style, cb) => {
+                    let newLayer = new _ol.layer.Vector({
+                        source: _source,
+                        projection: "ESPG: 4326",
+                        visible: true,
+                        title: _title,
+                        name: _name,
+                        style: _style
+                    });
+                    cb(newLayer);
+                },
+                RemovePOILayerByName: (_name) => {
+                    _featureDic.Remove(_name);
+                    var _layers = _poiLayerGroup.getLayers();
+                    var _layer = _layers.getArray().find(l => l.get("name") === _name);
+                    if (_layer) {
+                        _layers.remove(_layer);
+                        console.log("Removed Overpass Layer=" + _name);
+                    }
+                },
+                RemovePublicTransportLayerByName: (_name) => {
+                    _featureDic.Remove(_name);
+                    var _layers = _publicTransportLayerGroup.getLayers();
+                    var _layer = _layers.getArray().find(l => l.get("name") === _name);
+                    if (_layer) {
+                        _layers.remove(_layer);
+                        console.log("Removed Public Transport Layer=" + _name);
+                    }
+                },
+                RemoveSearchLayerByName: (_name) => {
+                    _nominatimResultDic.RemoveAll();
+                    var _layers = _searchLayerGroup.getLayers();
+                    var _layer = _layers.getArray().find(l => l.get("name") === _name);
+                    if (_layer) {
+                        _layers.remove(_layer);
+                        console.log("Removed Nominatim Layer=" + _name);
+                    }
+                }
+            };
+            let _baseMapSources = {
+                OSMTileSource: new _ol.source.OSM(),
+                STAMENToner: new _ol.source.Stamen({ layer: 'toner' }),
+                STAMENWaterColor: new ol.source.Stamen({ layer: 'watercolor' })
+            }
+            let _baseMapLayers = {
+                OSMVectorLayer: new _ol.layer.Tile({
+                    source: _baseMapSources.OSMTileSource
+                }),
+                STAMENToner: new _ol.layer.Tile({
+                    title: 'Stamen - Toner',
+                    type: 'base',
+                    visible: true,
+                    source: _baseMapSources.STAMENToner
+                }),
+                STAMENWaterColor: new _ol.layer.Tile({
+                    title: 'Water color',
+                    type: 'base',
+                    visible: true,
+                    source: _baseMapSources.STAMENWaterColor
+                }),
+                Iran1889: new ol.layer.Tile({
+                    source: new ol.source.XYZ({
+                        url: 'http://mapwarper.net/maps/tile/34878/{z}/{x}/{y}.png'
+                    })
+                })
+            }
+            let _defaultLayerSettings = {
+                BaseLayers: [_baseMapLayers.OSMVectorLayer, _baseMapLayers.Iran1889],
+                VectorLayers: [],
+                SearchLayers: [],
+                PublicTransportLayers: [],
+                StaticLayers : []
+            }
+            let renderMap = (layerSettings, cb) => {
+
+                if (layerSettings) {
+                    let _options = Object.assign(_defaultLayerSettings, layerSettings);
+                    console.log(_options);
+                    _baseLayerGroup = new _ol.layer.Group({
+                        title: 'Base Layers',
+                        layers: _options.BaseLayers
+                    });
+                    _poiLayerGroup = new _ol.layer.Group({
+                        title: 'Vector Layers',
+                        layers: _options.VectorLayers
+                    });
+                    _searchLayerGroup = new _ol.layer.Group({
+                        title: 'Search Layers',
+                        layers: _options.SearchLayers
+                    });
+                    _publicTransportLayerGroup = new _ol.layer.Group({
+                        title: 'Public Transport Layers',
+                        layers: _options.PublicTransportLayers
+                    });  
+                    _staticLayerGroup = new _ol.layer.Group({
+                        title: 'Static Layers',
+                        layers: _options.StaticLayers
+                    }); 
+
+               
+                }
+                else {
+                    _baseLayerGroup = new _ol.layer.Group({
+                        title: 'Base Layers',
+                        layers: _defaultLayerSettings.BaseLayers
+                    });
+                    _poiLayerGroup = new _ol.layer.Group({
+                        title: 'Vector Layers',
+                        layers: _defaultLayerSettings.VectorLayers
+                    });
+                    _searchLayerGroup = new _ol.layer.Group({
+                        title: 'Search Layers',
+                        layers: _defaultLayerSettings.SearchLayers
+                    });
+                    _publicTransportLayerGroup = new _ol.layer.Group({
+                        title: 'Public Transport Layers',
+                        layers: _defaultLayerSettings.PublicTransportLayers
+                    });
+                    _staticLayerGroup = new _ol.layer.Group({
+                        title: 'Static Layers',
+                        layers: _defaultLayerSettings.StaticLayers
+                    });
+                }
+                _map = new _ol.Map({
+                    layers: [_baseLayerGroup, _staticLayerGroup, _poiLayerGroup, _searchLayerGroup, _publicTransportLayerGroup],
+                    target: _options.domElement,
+                    view: new _ol.View({
+                        projection: _options.projection,
+                        center: _options.center,
+                        zoom: _options.zoomLevel
+                    })
+                });
+                _map.getView().on('change:resolution', _utils.OnResoluionChange);
+                cb(_map);
+            };
+            return {
+                Map: _map,
+                VectorMapLayers: _vectorMapLayers,
+                FeatureDictionary: _featureDic,
+                NominatimResultDic: _nominatimResultDic,
+                POILayerGroup: _poiLayerGroup,
+                StaticLayerGroup: _staticLayerGroup,
+                SearchLayerGroup: _searchLayerGroup,
+                PublicTransportLayerGroup: _publicTransportLayerGroup,
+                BaseMapLayers: _baseMapLayers,
+                ExtendedMapControl: _extendedMapControl,
+                RenderMap: renderMap,
+                Utils: _utils
+            }
+        }
+
+        var r6map = new R6Map(ol, {
+            projection: 'EPSG:3857',
+            zoomLevel: 16
+        });
+
+
+        var PoiDetails = function (c) {
+            var self = this;
+            self.pkid = ko.observable(0);
+            self.categoryid = ko.observable(0);
+            self.caption = ko.observable(c);
+            self.lat = ko.observable(0);
+            self.lon = ko.observable(0);
+            self.hasWifi = ko.observable(false);
+            self.petAllowed = ko.observable(false);
+            self.clickOnFeature = function (obj) {
+                // Click handler on each caption . 
+                // We should extract the coordinate here and animate the map to it and show the popup.
+                console.log(obj);
+                console.log('Map Object');
+                console.log(r6map.Map);
+                console.log(r6map.POILayerGroup)
+            }
+        };
+        var SearchResult = function (sr) {
+            var self = this;
+            self.pkid = ko.observable(1);
+            self.featureName = ko.observable(sr.display_name);
+            self.featureAddress = ko.observable(sr.road);
+            self.osmid = ko.observable(sr.osm_id);
+            self.osmtype = ko.observable(sr.osm_type);
+            self.lat = ko.observable(sr.lat);
+            self.lon = ko.observable(sr.lon);
+            self.boundingbox = ko.observable(sr.boundingbox);
+            self.type = ko.observable(sr.type);
+        }
+        var PoiCategories = function (i, c) {
+            var self = this;
+            self.pkid = ko.observable(i);
+            self.caption = ko.observable(c);
+            self.poiItems = ko.observableArray([]);
+        };
+        var BoardItems = function (id, categoryname, faname, enname, icon, query) {
+            var self = this;
+            self.pkid = ko.observable(id);
+            self.poiname = ko.observable(faname);
+            self.poienname = ko.observable(enname);
+            self.categoryname = ko.observable(categoryname);
+            self.poiicon = ko.observable(icon);
+            self.poiquery = ko.observable(query);
+            self.clickOnPoi = function (obj) {
+                // Click handler on each POI in Select Board
+                // We use Query recieved from Api to Initiate a new fres request to Overpass API
+                console.log(obj);
+
+            }
+        };
+
+        var BoardPanel = function (id, caption) {
+            var self = this;
+            self.pkid = ko.observable(id);
+            self.panelcaption = ko.observable(caption);
+            self.panelitems = ko.observableArray([]);
+        }  
+        var FinalViewModel = function () {
+            var self = this;
+            self.panelCaption = ko.observable("Panel Captionnnn");
+            self.poilist = ko.observableArray([]);
+            self.selectboards = ko.observableArray([]);
+            self.searchTerm = ko.observable('تهران بانک پاسارگاد');
+            self.selectedSearchFilter = ko.observable();
+            self.resultList = ko.observableArray([]);
+            self.searchTerm.subscribe(function (val) {
+                console.log("Keyword Changed ");
+                console.log(val);
+            });
+            self.searchClick = function (obj) {
+                // Click handler on each POI in Select Board
+                // We use Query recieved from Api to Initiate a new fres request to Overpass API
+                console.log(obj);
+                r6map.VectorMapLayers.RemoveSearchLayerByName('SLayer');
+                //'تهران بانک پاسارگاد'
+                r6map.VectorMapLayers.CreateNominatimLayer(self.searchTerm(), 'SLayer', {}, (layer, vsg) => {
+                    console.log("Created Nominatim Layer= SLayer");
+                    vsg.getLayers().push(layer);
+                    console.log("Added to Map...");
+                    console.log(layer.get("name"));
+                    r6map.SearchLayerGroup = vsg;
+                    r6map.Map.getView().fit(layer.getSource().getExtent());
+                });
+
+            }
+            self.selectedSearchFilter.subscribe(function (val) {
+            });
+            self.syncSelectBoardData = (boardData) => {
+                for (var key in boardData.DataSource.getProperties()) {
+                    var objFromApi = boardData.DataSource.get(key);
+                    var boardPanel = new BoardPanel(objFromApi.TargetCategory.Pkid, objFromApi.TargetCategory.CategoryNameFa);
+                    $.each(objFromApi.POIItems, (i, v) => {
+                        boardPanel.panelitems.push(new BoardItems(v.Pkid, key, v.POINameFa, v.POIName, v.IconName, v.OverpassQuery));
+                    });
+                    self.selectboards().push(boardPanel);
+                }
+            };
+
+            self.syncPanel= () => {
+                self.poilist.removeAll();
+                var counter = 1;
+                for (var key in r6map.FeatureDictionary.DataSource.getProperties()) {
+                    //console.log(key + " =-> " + r6map.FeatureDictionary.DataSource.get(key));
+                    var obj = r6map.FeatureDictionary.DataSource.get(key);
+                    var poisc = new PoiCategories(counter++, key);
+                    self.poilist().push(poisc);
+                    $.each(obj, (i, f) => {
+
+                        var prop = f.getProperties();
+                        if (prop['name']) {
+                            poisc.poiItems.push(new PoiDetails(prop['name']));
+                        }
+                        else {
+                            poisc.poiItems.push(new PoiDetails('No Name'));
+                        }
+                    });
+                }
+                self.poilist.valueHasMutated();
+            };
+            self.syncSearchResult = () => {
+                self.resultList.removeAll();
+                for (var key in r6map.NominatimResultDic.DataSource.getProperties()) {
+                    var objResult = r6map.NominatimResultDic.DataSource.get(key);
+                    var resultItem = new SearchResult(objResult);
+                    self.resultList.push(resultItem);
+                }
+                //console.log(self.resultList());
+            };
+            self.createHref = function (id) {
+                let _prefix = '#collapse';
+                let href = _prefix + id();
+                return href;
+            };
+            self.createUniqueAccordionID = function (id) {
+                let _prefix = 'collapse';
+                let unid = _prefix + id();
+                return unid;
+            };
+            self.createUniqueCheckboxID = function (id) {
+                let _prefix = 'cb';
+                let unid = _prefix + id();
+                return unid;
+            };
+            self.createFontAwesomeClass = function (iconname) {
+                let _prefix= 'fa ';
+                let cssclass = _prefix + iconname();
+                return cssclass;
+            };
+            this.ShowMessage = () => {
+                r6map.Utils.ToastrMessage("Info", "View Model", 3, 3);
+            };
+            //self.syncData();
+        };
+
+
+        r6map.RenderMap(null, (map) => {
+            r6map.Map = map;
+            var tempExtent = [51.388410329818726, 35.72975702500237, 51.42259240150452, 35.74543250700167];
+            //var q1 = '[timeout:45];(node({{bbox}})rel(bn)->.foo;way(bn);node(w)->.foo;rel(bw););out meta;';
+            var q1 = 'node({{bbox}})rel(bn)->.foo;way(bn);node(w)->.foo;rel(bw);';
+            //var q2 = '[timeout:35];(node[amenity=bank]({{bbox}}));out meta;';
+            var q2 = 'node[amenity=bank]({{bbox}})';
+            //var q3 = '[timeout:25];(node[amenity=atm]({{bbox}}));out meta;';
+            var q3 = 'node[amenity=atm]({{bbox}})';
+            var t2 = r6map.Utils.OverpassBBoxQuery(r6map.Utils.Region6Extent, q2);
+            var t3 = r6map.Utils.OverpassBBoxQuery(r6map.Utils.Region6Extent, q3);
+            //OverpassBBoxQuery
+            //var q = '[timeout:45];(node(35.72975702500237,51.388410329818726,35.74543250700167,51.42259240150452);rel(bn)->.foo;way(bn);node(w)->.foo;rel(bw););out meta;';
+            //console.log(q);
+            //r6map.VectorMapLayers.CreateOverpassPOILayer(t2, "Bank", (layer, vg) => {
+            //    console.log("Created Overpass Layer");
+            //    vg.getLayers().push(layer);
+            //    console.log("Added to Map...");
+            //    console.log(layer.get("name"));
+            //    r6map.POILayerGroup = vg;
+            //});
+            //r6map.VectorMapLayers.CreateOverpassPOILayer(t3, "Atm", (layer, vg) => {
+            //    console.log("Created Second Overpass Layer");
+            //    vg.getLayers().push(layer);
+            //    console.log("Added to Map...");
+            //    console.log(layer.get("name"));
+            //    r6map.POILayerGroup = vg;
+            //});
+            r6map.VectorMapLayers.CreateOverPassTransportLayer("PublicTransport", (layer, ptlg) => {
+                //layer.setStyle(r6map.Utils.Styles.TestStaticStyle);
+                console.log("Creating Public Transport Overpass Layer");
+                ptlg.getLayers().push(layer);
+                console.log(layer.get("name"));
+                r6map.PublicTransportLayerGroup = ptlg;
+                console.log(map);
+            });
+            r6map.VectorMapLayers.CreateStaticLayer(r6map.Utils.Constants.R6_StaticBoundary_Query, 'R6Boundary', (layer, slg) => {
+                console.log("Creating Static Overpass Layer 1");
+                slg.getLayers().push(layer);
+                console.log(layer.get("name"));
+                r6map.StaticLayerGroup = slg;
+            });
+            r6map.VectorMapLayers.CreateStaticLayer(r6map.Utils.Constants.Tehran_TrafficBoundary_Query, 'TehranTraffic', (layer, slg) => {
+ 
+                console.log("Creating Static Overpass Layer 2 ");
+                slg.getLayers().push(layer);
+                console.log(layer.get("name"));
+                r6map.StaticLayerGroup = slg;
+            });
+            r6map.VectorMapLayers.CreateStaticLayer(r6map.Utils.Constants.Tehran_EvenOdd_Traffic_Boudary_Query, 'TehranEvenOdd', (layer, slg) => {
+
+                console.log("Creating Static Overpass Layer 3");
+                slg.getLayers().push(layer);
+                console.log(layer.get("name"));
+                r6map.StaticLayerGroup = slg;
+            });
+            var cellSide = 0.5;
+            var options = { units: 'miles' };
+
+            var grid = turf.hexGrid(r6map.Utils.Region6Extent, cellSide);
+            var point1 = turf.point([51.40949249267578,35.712497363843845]);
+            var buffered = turf.buffer(point1, 0.25);
+            buffered.properties = { foo: 'bar', distance: 250, 'addr:zone': 3 };
+            var geometry = {
+                "type": "Point",
+                "coordinates": [110, 50]
+            };
+
+            var feature = turf.feature(geometry);
+            //console.log(feature);
+            var styleFunction = function (feature) {
+                return r6map.Utils.Styles.NominatimStyle[feature.getGeometry().getType()];
+            };
+            var vectorSource = new ol.source.Vector({
+                features: (new ol.format.GeoJSON()).readFeatures(buffered, {
+                    dataProjection: 'EPSG:4326',
+                    featureProjection: 'EPSG:3857'
+                })
+            });
+
+            var vectorLayer = new ol.layer.Vector({
+                source: vectorSource,
+                style: styleFunction
+            });
+
+            //http://mapwarper.net/maps/34878.kml
+            //https://openlayers.org/en/v4.6.5/examples/data/kml/2012-02-10.kml
+            //http://mapwarper.net/maps/tile/34878/{z}/{x}/{y}.png
+            map.addLayer(vectorLayer);
+            //map.getView().fit(vectorSource.getExtent());
+        });
+
+
+        $(document).ready(function () {
+            var vm = new FinalViewModel();
+
+            var boardDic = new r6map.Utils.Dictionary();
+            r6map.FeatureDictionary.RegisterEvent((evt) => {
+                vm.syncPanel();
+            });
+            r6map.NominatimResultDic.RegisterEvent((evt) => {
+                vm.syncSearchResult();
+            });
+            r6map.Utils.GetPOIDetails().then((response) => {
+                // Use the response to render main Select board or 
+                // Create a ViewModel and let the MVVM does the rest of the job
+                var responseCount = response.length;
+                var msg = "We just received " + responseCount + " categories.";
+                r6map.Utils.ToastrMessage("Info", msg, 3, 2);
+                boardDic.RegisterEvent((evt) => {
+                    //console.log("boardDic Property Changed");
+                    //console.log(evt.key);
+                    //console.log(evt.target.get(evt.key));
+                });
+                $.each(response, (i, v) => {
+                    boardDic.Add(v.TargetCategory.CategoryName, v);
+                });
+                vm.syncSelectBoardData(boardDic);
+                ko.applyBindings(vm);
+            }).catch((err, ex) => {
+                r6map.Utils.ToastrMessage("Error", "We do not recieve our expected data to render Select Board", 5, 1);
+                console.log(err);
+                console.log(ex);
+                });
+
+            $(document).on("change", "input[type= 'checkbox']", function () {
+                var poiid = parseInt($(this).data("poiid"));
+                var poienname = $(this).data('poiname');
+                var catname = $(this).data('catname');
+                var targetItem = boardDic.Find(catname);
+                var targetpoi = targetItem.POIItems.find(p => p.Pkid === poiid);
+                var query = targetpoi.OverpassQuery;
+                var msg = "Poi name=" + poienname + " in " + catname;
+                if (this.checked) {
+                    msg += " Checked";
+                    var tquery = r6map.Utils.OverpassAreaQuery(query);
+                    r6map.VectorMapLayers.CreateOverpassPOILayer(tquery, poienname, (layer, vg) => {
+                        console.log("Created Overpass Layer=" + poienname);
+                        vg.getLayers().push(layer);
+                        console.log("Added to Map...");
+                        console.log(layer.get("name"));
+                        r6map.POILayerGroup = vg;
+                    });
+                } else {
+                    msg += " Unchecked";
+                    r6map.VectorMapLayers.RemovePOILayerByName(poienname)
+                }
+                r6map.Utils.ToastrMessage("Checkbox Event", msg, 3, 2);
+
+            });
+            //var s1 = r6map.Utils.CreateKeyValueStyle('amenity', 'bank');
+            //console.log('=========================');
+            //console.log(s1);
+
+
+
+        });
+
+    </script>
+<br /><br /><br />
+            <div class="row" id="btarget">
+                <div class="col-md-9">
+                    <div id="map" class="map" style="width:100%;height:500px;color:rgb(0, 0, 0)"></div>
+                </div>
+                <div class="col-md-3" style="direction:rtl;font-family:irsans">
+                    <div data-bind="text:$root.poilist().length"></div>
+
+                    <div class="panel-group" id="accordion" data-bind='foreach: $root.poilist'>
+                        <div class="panel panel-default">
+                            <div class="panel-heading">
+                                <h4 class="panel-title">
+                                    <a data-toggle="collapse" data-parent="#accordion" data-bind="attr:{'href':$root.createHref(pkid)}">
+                                        <span data-bind="text:caption"></span>
+                                    </a>
+                                </h4>
+                            </div>
+                            <div data-bind="attr:{'id':$root.createUniqueAccordionID(pkid)}" class="panel-collapse collapse">
+                                <div class="panel-body" data-bind='foreach: poiItems'>
+                                    <div data-bind="text:caption,click:clickOnFeature" style="cursor:pointer"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6" style="direction:rtl;font-family:irsans" data-bind='foreach: $root.selectboards'>
+                    <div style="background-color:#a5a5a5;padding:10px;color:#fff;">
+                        <div style="background-color:#666;color:#fff;padding:5px"><span data-bind="text:panelcaption"></span>&nbsp;<span class="badge bg-info" data-bind='text: panelitems().length'>&nbsp;</span>    </div>
+                        <div data-bind='foreach: panelitems'>
+                            <input type="checkbox" data-bind="attr:{'id':$root.createUniqueCheckboxID(pkid), 'data-poiid': pkid, 'data-poiname':poienname, 'data-catname':categoryname}" />&nbsp;<i data-bind="attr:{'class': $root.createFontAwesomeClass(poiicon)}" style="color:#fff"></i>&nbsp;<label data-bind="text:poiname, attr:{'for':$root.createUniqueCheckboxID(pkid)}"></label><br />
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6" style="font-family:irsans">
+                    <div class="row">
+                        <div class="col-md-12 input-group">
+                            <span class="input-group-addon" style="cursor:pointer;" data-bind="click:$root.searchClick">
+                                <i class="glyphicon glyphicon-search"></i>                                
+                            </span>
+                            <select id="searchField" class="form-control">
+                                <option value="1">Search Filter 1</option>
+                                <option value="2">Search Filter 2</option>
+                            </select>
+                            <span class="input-group-addon">
+                                <i class="glyphicon glyphicon-th-list"></i>
+                            </span>
+                            <input type="text" class="form-control input-group-addon" data-bind="textInput:searchTerm" placeholder="لطفا تايپ کنيد" />
+                            <span class="input-group-addon">
+                                <b class="badge bg-red" data-bind="text:$root.resultList().length"></b>
+                            </span>
+                        </div>
+                        <div class="col-md-12" style="direction:rtl" data-bind='foreach: $root.resultList'>
+                            <div style="background-color:#eee;color:#000;padding:10px;margin-bottom:2px;">
+                                <span data-bind="text:featureName"></span><br />
+                                <span data-bind="text:featureAddress"></span><br />
+                                <span data-bind="text:lon"></span>&nbsp;<span data-bind="text:lat"></span><br />
+                                OSM=<span data-bind="text:osmtype"></span>&nbsp;(<span data-bind="text:osmid"></span>)<br />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+<div class="row">
+
+</div>
