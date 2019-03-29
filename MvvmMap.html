@@ -1,3 +1,4 @@
+
 <link rel="stylesheet" href="~/Content/ol465.min.css" />
 <link rel="stylesheet" href="~/Content/ol-ext.css" />
     <script src="~/Scripts/ol.js"></script>
@@ -22,7 +23,7 @@
                 'way["railway"="light_rail"](area.tehranArea);',
                 'way[electrified](area.tehranArea);',
                 'relation[type=route][route=bus](area.tehranArea);',
-                'node[highway=bus_stop](area.tehranArea);',
+                //'node[highway=bus_stop](area.tehranArea);',
                 'way[highway=service][bus=yes](area.tehranArea);',
                 ');',
                 'out ids geom meta;',
@@ -50,13 +51,27 @@
                 MousePosition: new _ol.control.MousePosition(),
                 FullScreen: new _ol.control.FullScreen()
             };
+
             let _utils = {
                 Constants: {
                     R6_StaticBoundary_Query : '[out: json][timeout: 20]; (relation(id: 6729037);); out ids geom meta;',
                     Tehran_TrafficBoundary_Query : '[out:json][timeout: 20];( way(id: 407209895);); out ids geom meta;',
                     Tehran_EvenOdd_Traffic_Boudary_Query : '[out:json][timeout: 20];( way(id: 301709587);); out ids geom meta;'
                 },
-
+                AnimateMapView: (coord) => {
+                    /* console.log(_map.getView().center) */
+                    _map.getView().animate({
+                        center: coord,
+                        duration: 1000,
+                        zoom: 17
+                    });
+                },
+                ShowPopup : (coord, content) => {
+                    /* alert(coord)
+                    alert(content) */
+                    /*  console.log(_overlays.popup) */
+                    _overlays.PopupOverlay.show(coord, content);
+                },
                 Region6Extent: [51.375503540039055, 35.69996510861432, 51.43077850341797, 35.75682142111113],
                 TargetExtent: [51.375503540039055, 35.69996510861432, 51.43077850341797, 35.75682142111113],
                 TargetR6Area: '(area["name:en"="District 6"][admin_level=10];)->.searchArea;',
@@ -206,6 +221,32 @@
                             })
                         })
                     },
+                    POISelectStyle:  new ol.style.Style({
+                        image: new ol.style.FontSymbol({
+                            form: "bubble",
+                            fontSize: 0.7,
+                            radius: 16,
+                            fontStyle: '',
+                            color: "red",
+                            rotation: 0,
+                            rotateWithView: false,
+                            offsetY: 0,
+                            fill: new ol.style.Fill({
+                                color: "red"
+                            }),
+                            stroke: new ol.style.Stroke({
+                                width: 2,
+                                color: "white"
+                            })
+                        }),
+                        stroke: new ol.style.Stroke({
+                            color: "white",
+                            width: 1
+                        }),
+                        fill: new ol.style.Fill({
+                            color: "yellow"
+                        })
+                    }),
                     ControlStyles: {
                         DrawingStyle : new _ol.style.Style({
                             fill: new ol.style.Fill({
@@ -1299,6 +1340,125 @@
                         });
                     }
                 },
+                TagParser: (f) => {
+
+                    var prop = f.getProperties();
+                    console.log(prop)
+
+                    var formatSimpleTxt = (_class, value) => {
+                        return '<p class="' + _class + '">' + value + '</p>'
+                    };
+
+                    var formatLinkIcon = (link, icon, _classIcon) => {
+                        return '<a href="' + link + '" target="_blank"><i class="' + icon + ' ' +
+                            _classIcon + '"></i></a>'
+                    }
+
+                    var formatTxtIcon = (title, value, icon, _iconClass) => {
+                        return '<i class="' + icon + ' ' + _iconClass + '"></i><p>' + title + ': ' +
+                            value + '</p>'
+                    }
+
+                    var formatLink = (link, icon, _iconClass) => {
+                        return '<i class="' + icon + ' ' + _iconClass + '"></i><a href="' + link +
+                            '" target="_blank">' +
+                            link + '</a>'
+                    }
+
+
+
+                    var header = prop => {
+                        var _head = ''
+
+                        if (prop.name) {
+                            _head += formatSimpleTxt('', prop.name)
+                        }
+
+                        if (prop.amenity || tags.highway) {
+                            if (prop.amenity) {
+                                _head += formatSimpleTxt('fL', prop.amenity)
+                            } else if (prop.highway) {
+                                _head += formatSimpleTxt('fL', prop.highway)
+                            };
+                        };
+
+                        if (prop.osmtype === "node") {
+                            var link = 'https://www.openstreetmap.org/edit?editor=id&node=' + prop.osmid
+                            var icon = 'fab fas fa-edit'
+                            var _classIcon = 'link-btn-popup'
+                            _head += formatLinkIcon(link, icon, _classIcon)
+
+                        } else if (prop.osmtype === "way") {
+                            var link = 'https://www.openstreetmap.org/edit?editor=id&way=' + prop.osmid
+                            var icon = 'fab fas fa-edit'
+                            var _classIcon = 'link-btn-popup'
+                            _head += formatLinkIcon(link, icon, _classIcon)
+                        }
+                        return _head
+                    }
+
+
+
+                    var body = prop => {
+                        var _body = ''
+
+                        if (prop['addr:street'] || prop['addr:place']) {
+                            var address = ''
+                            if (prop['addr:housename'] && prop['addr:housename'] !== prop.name) {
+                                address += prop['addr:housename']; + " "
+                            };
+                            if (prop['addr:flats']) {
+                                address += prop['addr:flats']; + " "
+                            };
+                            if (prop['addr:unit']) {
+                                address += prop['addr:unit']; + " "
+                            };
+                            if (prop['addr:street']) {
+                                var street = prop['addr:street'];
+                                var streetReplace = street.replace("خیابان", '')
+                                address += "خیابان " + streetReplace + " "
+                            } else if (prop['addr:place']) {
+                                address += prop['addr:place']; + " "
+                            };
+                            if (prop['addr:housenumber']) {
+                                address += " ،پلاک " + prop['addr:housenumber']; + " "
+                            };
+                            if (prop['addr:suburb']) {
+                                address += prop['addr:suburb']; + " "
+                            } else if (prop['addr:hamlet']) {
+                                address += prop['addr:hamlet']; + " "
+                            };
+                            /* if (prop['addr:city']) {
+                                address += prop['addr:city'];
+                            }; */
+                            if (prop['addr:postcode']) {
+                                address += prop['addr:postcode']; + " "
+                            };
+                            if (address.length) {
+                                _body += formatTxtIcon('آدرس', address, 'fas fa-map-marker', 'popup-icon')
+                            };
+                        };
+
+                        if (prop.phone || prop['contact:phone']) {
+                            var Phone = prop.phone || prop['contact:phone'];
+                            var phoneReformed = Phone.replace("+98", "")
+                            _body += formatTxtIcon('تلفن', phoneReformed, 'fas fa-phone', 'popup-icon')
+                        };
+
+                        if (prop.website || prop['contact:website'] || prop['contact:webcam']) {
+                            var website = prop.website || prop['contact:website'] || prop['contact:webcam'];
+                            _body += formatLink(website, 'fas fa-globe', 'popup-icon')
+                        };
+
+                        return _body
+                    }
+
+                    var content = '<div class="popupHeader">' + header(prop) + '</div>' +
+                        '<div class="popupBody">' + body(prop) +
+                        '</div>'
+
+                    return content
+                },
                 ChangeTargetExtent: (newExtent) => {
                     _utils.ToastrMessage("Event", "Resolution/Extent Changed. Calculating Target Extent...", 6, 2);
                     if (_ol.extent.containsExtent(_utils.Region6Extent, newExtent)) {
@@ -1367,13 +1527,104 @@
                     }
 
                 },
-                OnResoluionChange: (evt) => {
-                    //console.log(evt);
-                    var ex = _map.getView().calculateExtent(_map.getSize())
-                    var epsg4326Extent = _utils.To4326Extent(ex, _map.getView().getProjection());
-                    _utils.ChangeTargetExtent(epsg4326Extent);
+                EventHandlers: {
+                    OnResoluionChange: (evt) => {
+                        //console.log(evt);
+                        var ex = _map.getView().calculateExtent(_map.getSize())
+                        var epsg4326Extent = _utils.To4326Extent(ex, _map.getView().getProjection());
+                        _utils.ChangeTargetExtent(epsg4326Extent);
+                    },
+                    OnAddFeatureToInteraction : (evt) =>  {
+                        console.log("select OnAddFeatureToInteraction");
+                        var feature = evt.element;
+
+                        /* var getGeo = feature(layers, id, type).get['geometry'] */
+                        /* console.log(getGeo) */
+                        /* var a = feature(layers, id, type) */
+                        /* console.log(r6map.FeatureDictionary.DataSource) */
+
+                        _utils.AnimateMapView(feature.getGeometry().getFirstCoordinate());
+                        _utils.ShowPopup(feature.getGeometry().getFirstCoordinate(), _utils.tagparser(feature));
+
+                    }
+                },
+            };
+            let _mapInteractions = {
+                GlobalSelectInteraction: null ,
+                CreateSelectPOIInteraction: (cb) => {
+                    if (_mapInteractions.GlobalSelectInteraction === null) {
+                        _mapInteractions.GlobalSelectInteraction = new _ol.interaction.Select({
+                            layers: function (layer) {
+                                console.log(layer)
+                                return layer.get('selectable') == true;
+                            },
+                            filter: function (feature, layer) {
+                                return feature.getGeometry().getType() !== "Polygon";
+                            },
+                            style: _utils.Styles.POISelectStyle
+                        });
+                        _mapInteractions.GlobalSelectInteraction.getFeatures().on(["add"], _utils.EventHandlers.OnAddFeatureToInteraction);
+                    }
+                    cb(_mapInteractions.GlobalSelectInteraction);
+                },
+                CreateDrawInteraction: (_type, _style, _source, cb) => {
+                    let _drawInteraction = new _ol.interaction.Draw({
+                        type: _type,
+                        style: _style,
+                        source: _soource,
+                        geometryFunction: function (coordinates, geometry) {
+                            let _geom = {};
+                            switch (_type.toUpperCase()) {
+                                case 'POINT':
+                                    _geom = _geometryFunctions.DrawPoint(coordinates, geometry, this);
+                                    break;
+                                case 'LINESTRING':
+                                    _geom = _geometryFunctions.DrawLineString(coordinates, geometry, this);
+                                    break;
+                                case 'POINT':
+                                    _geom = _geometryFunctions.DrawPolygon(coordinates, geometry, this);
+                                    break;
+                            }
+                            return _geom;
+                        }
+                    });
+                    cb(_drawInteraction);
                 }
             };
+            let _geometryFunctions = {
+                DrawPoint: (coords, geom , interaction) => {
+                },
+                DrawLineString: (coords, geom, interaction) => {
+                    _map.removeInteraction(_mapInteractions.GlobalSelectInteraction);
+                    _overlays.PopupOverlay.hide();
+                    if (geom) {
+                        geom.setCoordinates(coords);
+                    }
+                    else {
+                        geom = new _ol.geom.LineString(coords);
+                    } 
+                    interaction.nbpts = geom.getCoordinates().length;
+                    return geom;
+                },
+                DrawPolygon: (coords, geom, interaction) => {
+                    interaction.nbpts = coords[0].length;
+                    if (geom) {
+                        geom.setCoordinates([coords[0].concat([coords[0][0]])]);
+                    }
+                    else {
+                        geom = new _ol.geom.Polygon(coords);
+                    } 
+                    return geom;
+                }
+            };
+            let _overlays = {
+                PopupOverlay: new _ol.Overlay.Popup({
+                    popupClass: "default orange", //"tooltips", "warning" "black" "default", "tips", "shadow",
+                    closeBox: true,
+                    shadow: true,
+                    positioning: "bottom-center",
+                }),
+            }
             let _featureDic = new _utils.Dictionary();
             let _nominatimResultDic = new _utils.Dictionary();
             let _vectorMapSources = {
@@ -1675,11 +1926,13 @@
                         zoom: _options.zoomLevel
                     })
                 });
-                _map.getView().on('change:resolution', _utils.OnResoluionChange);
+                _map.getView().on('change:resolution', _utils.EventHandlers.OnResoluionChange);
+
                 cb(_map);
             };
             return {
                 Map: _map,
+                MapInteractions: _mapInteractions,
                 VectorMapLayers: _vectorMapLayers,
                 FeatureDictionary: _featureDic,
                 NominatimResultDic: _nominatimResultDic,
@@ -2015,6 +2268,7 @@
         });
 
     </script>
+
 <br /><br /><br />
             <div class="row" id="btarget">
                 <div class="col-md-9">
@@ -2080,3 +2334,4 @@
 <div class="row">
 
 </div>
+
